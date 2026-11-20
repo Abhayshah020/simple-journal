@@ -1,6 +1,6 @@
 
 "use client";
-
+import Script from "next/script";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Chart as ChartJS,
@@ -27,6 +27,31 @@ ChartJS.register(
   Title,
   Filler
 );
+
+declare global {
+  interface Window {
+    google?: {
+      accounts: {
+        id: {
+          initialize: (config: {
+            client_id: string;
+            callback: (response: { credential: string }) => void;
+          }) => void;
+          renderButton: (
+            element: HTMLElement,
+            options: {
+              theme?: string;
+              size?: string;
+              shape?: string;
+              width?: number;
+              text?: string;
+            }
+          ) => void;
+        };
+      };
+    };
+  }
+}
 
 // -----------------------------------------------------------------------------
 // Configuration
@@ -511,10 +536,16 @@ const lineOptions = {
 
 export default function Home() {
   // Authentication
+  // const [authenticated, setAuthenticated] = useState(false);
+  // const [password, setPassword] = useState("");
+  // const [loginLoading, setLoginLoading] = useState(false);
+  // const [loginError, setLoginError] = useState("");
+
+  // Authentication
   const [authenticated, setAuthenticated] = useState(false);
-  const [password, setPassword] = useState("");
   const [loginLoading, setLoginLoading] = useState(false);
   const [loginError, setLoginError] = useState("");
+  const [googleReady, setGoogleReady] = useState(false);
 
   // Application data
   const [strategies, setStrategies] = useState<Strategy[]>([]);
@@ -653,9 +684,37 @@ export default function Home() {
     }
   }, [api, selectedStrategyId]);
 
+  // useEffect(() => {
+  //   refreshData();
+  // }, []); // Initial authentication check.
+
   useEffect(() => {
-    refreshData();
-  }, []); // Initial authentication check.
+    let cancelled = false;
+
+    async function checkSession() {
+      try {
+        const session = await api("/api/auth/me");
+
+        if (cancelled) return;
+
+        if (session.authenticated) {
+          await refreshData();
+        } else {
+          setAuthenticated(false);
+        }
+      } catch {
+        if (!cancelled) {
+          setAuthenticated(false);
+        }
+      }
+    }
+
+    checkSession();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [api, refreshData]);
 
   useEffect(() => {
     if (!authenticated || !selectedStrategyId) {
@@ -702,29 +761,89 @@ export default function Home() {
   // Authentication
   // ---------------------------------------------------------------------------
 
-  async function handleLogin(event: React.FormEvent) {
-    event.preventDefault();
+  const handleGoogleLogin = useCallback(
+    async (credential: string) => {
+      setLoginLoading(true);
+      setLoginError("");
 
-    setLoginLoading(true);
-    setLoginError("");
+      try {
+        await api("/api/auth/google", {
+          method: "POST",
+          body: JSON.stringify({ credential }),
+        });
 
+        await refreshData();
+      } catch (err) {
+        setLoginError(
+          err instanceof Error
+            ? err.message
+            : "Google login failed."
+        );
+      } finally {
+        setLoginLoading(false);
+      }
+    },
+    [api, refreshData]
+  );
+
+  const handleLogout = useCallback(async () => {
     try {
-      await api("/api/login", {
+      await api("/api/auth/logout", {
         method: "POST",
-        body: JSON.stringify({ password }),
       });
-
-      setPassword("");
-      setAuthenticated(true);
-      await refreshData();
-    } catch (err) {
-      setLoginError(
-        err instanceof Error ? err.message : "Login failed."
-      );
     } finally {
-      setLoginLoading(false);
+      setAuthenticated(false);
+      setStrategies([]);
+      setTrades([]);
+      setSelectedStrategyId("");
+      setError("");
     }
-  }
+  }, [api]);
+
+  useEffect(() => {
+    if (!googleReady || authenticated || !window.google) {
+      return;
+    }
+
+    const clientId = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID;
+
+    if (!clientId) {
+      setLoginError("Google Client ID is not configured.");
+      return;
+    }
+
+    const buttonContainer = document.getElementById(
+      "google-signin-button"
+    );
+
+    if (!buttonContainer) return;
+
+    buttonContainer.innerHTML = "";
+
+    window.google.accounts.id.initialize({
+      client_id: clientId,
+
+      callback: (response) => {
+        if (!response.credential) {
+          setLoginError("Google did not return a valid credential.");
+          return;
+        }
+
+        void handleGoogleLogin(response.credential);
+      },
+    });
+
+    window.google.accounts.id.renderButton(
+      buttonContainer,
+      {
+        theme: "outline",
+        size: "large",
+        shape: "rectangular",
+        width: 320,
+        text: "signin_with",
+      }
+    );
+  }, [googleReady, authenticated, handleGoogleLogin]);
 
   // ---------------------------------------------------------------------------
   // Strategy creation
@@ -1254,53 +1373,64 @@ export default function Home() {
   // Login screen
   // ---------------------------------------------------------------------------
 
+
   if (!authenticated) {
     return (
-      <main className="flex min-h-screen items-center justify-center bg-slate-100 px-4">
-        <form
-          onSubmit={handleLogin}
-          className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-7 shadow-sm"
-        >
-          <div className="mb-6">
-            <div className="mb-3 inline-flex rounded-full bg-indigo-50 px-3 py-1 text-xs font-semibold text-indigo-700">
-              PRIVATE DASHBOARD
+      <>
+        <Script
+          src="https://accounts.google.com/gsi/client"
+          strategy="afterInteractive"
+          onLoad={() => setGoogleReady(true)}
+          onError={() =>
+            setLoginError("Could not load Google Sign-In.")
+          }
+        />
+
+        <main className="flex min-h-screen items-center justify-center bg-slate-100 px-4">
+          <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-7 shadow-sm">
+            <div className="mb-7 text-center">
+              <div className="mb-4 inline-flex rounded-full bg-indigo-50 px-3 py-1 text-xs font-semibold text-indigo-700">
+                PRIVATE DASHBOARD
+              </div>
+
+              <h1 className="text-2xl font-bold text-slate-900">
+                Streak Simulator
+              </h1>
+
+              <p className="mt-2 text-sm text-slate-500">
+                Sign in with your authorized Google account
+                to access your trading journal and simulations.
+              </p>
             </div>
-            <h1 className="text-2xl font-bold text-slate-900">
-              Streak Simulator
-            </h1>
-            <p className="mt-2 text-sm text-slate-500">
-              Sign in to access your trading journal and simulations.
+
+            <div className="flex min-h-12 justify-center">
+              {loginLoading ? (
+                <p className="text-sm text-slate-500">
+                  Verifying your Google account...
+                </p>
+              ) : (
+                <div
+                  id="google-signin-button"
+                  className="flex justify-center"
+                />
+              )}
+            </div>
+
+            {loginError && (
+              <p className="mt-4 rounded-lg bg-rose-50 p-3 text-center text-sm text-rose-700">
+                {loginError}
+              </p>
+            )}
+
+            <p className="mt-6 text-center text-xs text-slate-400">
+              Access restricted to the authorized account.
             </p>
           </div>
-
-          <label className="block text-sm font-medium text-slate-700">
-            Dashboard password
-            <input
-              type="password"
-              autoComplete="current-password"
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-              required
-              className="mt-2 w-full rounded-xl border border-slate-300 px-3 py-3 outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
-            />
-          </label>
-
-          {loginError && (
-            <p className="mt-3 rounded-lg bg-rose-50 p-3 text-sm text-rose-700">
-              {loginError}
-            </p>
-          )}
-
-          <button
-            disabled={loginLoading}
-            className="mt-5 w-full rounded-xl bg-indigo-600 px-4 py-3 font-semibold text-white hover:bg-indigo-700 disabled:opacity-50"
-          >
-            {loginLoading ? "Signing in..." : "Sign in"}
-          </button>
-        </form>
-      </main>
+        </main>
+      </>
     );
   }
+
 
   // ---------------------------------------------------------------------------
   // Dashboard
@@ -1335,6 +1465,13 @@ export default function Home() {
               className="rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-indigo-700"
             >
               Refresh data
+            </button>
+            <button
+              type="button"
+              onClick={handleLogout}
+              className="rounded-lg border border-slate-200 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+            >
+              Sign out
             </button>
           </div>
         </div>
@@ -1495,8 +1632,8 @@ export default function Home() {
               </p>
               <p
                 className={`mt-2 text-2xl font-bold ${historicalNetPnl >= 0
-                    ? "text-emerald-600"
-                    : "text-rose-600"
+                  ? "text-emerald-600"
+                  : "text-rose-600"
                   }`}
               >
                 {fmt(historicalNetPnl)}
@@ -1758,8 +1895,8 @@ export default function Home() {
                         <td className="py-3 pr-4">
                           <span
                             className={`rounded-full px-2 py-1 text-xs font-semibold ${trade.netPnl >= 0
-                                ? "bg-emerald-50 text-emerald-700"
-                                : "bg-rose-50 text-rose-700"
+                              ? "bg-emerald-50 text-emerald-700"
+                              : "bg-rose-50 text-rose-700"
                               }`}
                           >
                             {trade.outcome}
@@ -1767,8 +1904,8 @@ export default function Home() {
                         </td>
                         <td
                           className={`py-3 pr-4 font-semibold ${trade.netPnl >= 0
-                              ? "text-emerald-600"
-                              : "text-rose-600"
+                            ? "text-emerald-600"
+                            : "text-rose-600"
                             }`}
                         >
                           {fmt(trade.netPnl)}
@@ -1812,8 +1949,8 @@ export default function Home() {
               <button
                 onClick={() => setMode("manual")}
                 className={`rounded-lg px-4 py-2 text-sm font-semibold ${mode === "manual"
-                    ? "bg-white text-indigo-700 shadow-sm"
-                    : "text-slate-600"
+                  ? "bg-white text-indigo-700 shadow-sm"
+                  : "text-slate-600"
                   }`}
               >
                 Manual model
@@ -1821,8 +1958,8 @@ export default function Home() {
               <button
                 onClick={() => setMode("real")}
                 className={`rounded-lg px-4 py-2 text-sm font-semibold ${mode === "real"
-                    ? "bg-white text-indigo-700 shadow-sm"
-                    : "text-slate-600"
+                  ? "bg-white text-indigo-700 shadow-sm"
+                  : "text-slate-600"
                   }`}
               >
                 Real data
